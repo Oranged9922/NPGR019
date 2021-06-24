@@ -60,6 +60,7 @@ void Camera::Move(MovementDirections direction, const glm::vec2& mouseMove, floa
   // Move the camera position
   glm::vec4& position = transform[3];
   position = _viewToWorld[3];
+
   if ((int)direction & (int)MovementDirections::Forward)
     position += dir * _movementSpeed * dt;
 
