@@ -1,8 +1,10 @@
 {
   "version": 2,
-  "dgSpecHash": "32VgehPZGGDhDef0Xnma1SPuAZZe7kbHIIOTDQqfRJMdnQOU/vD5ahrfW+H2iM5u5gH+Fj16wuamWYXNLSfvqg==",
+  "dgSpecHash": "OSetStCF5itVuIYirh9/Lo2O3TK/Cdq0LtonNcy6HEXbVzpK/PErZS2B40d2/ve3iEblsT5x0atmufNMxZ2uBQ==",
   "success": true,
   "projectFilePath": "C:\\Users\\Lukáš\\Documents\\GitHub\\school-related\\NPGR019\\csharpOpenGL\\csharpOpenGL.csproj",
-  "expectedPackageFiles": [],
+  "expectedPackageFiles": [
+    "C:\\Users\\Lukáš\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\5.0.14\\microsoft.netcore.app.host.win-x64.5.0.14.nupkg.sha512"
+  ],
   "logs": []
 }
