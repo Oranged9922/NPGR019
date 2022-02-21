@@ -163,14 +163,18 @@ bool compileShaders()
   {
     glGetProgramInfoLog(shaderProgram, MAX_BUFFER_LENGTH, nullptr, log);
     printf("Shader program linking failed: %s\n", log);
+
+    // Note that we dispose of the shaderProgram later on in the shutDown() function
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
     return false;
   }
 
   // Clean up resources we don't need anymore at this point
+  glDetachShader(shaderProgram, vertexShader);
   glDeleteShader(vertexShader);
   glDeleteShader(fragmentShader);
+  glDetachShader(shaderProgram, fragmentShader);
 
   return true;
 }
@@ -314,8 +318,18 @@ bool initOpenGL()
 // Helper method for graceful shutdown
 void shutDown()
 {
-  // Release the vertex buffer
+  // Release the vertex array object
   glDeleteVertexArrays(1, &vertexArrayObject);
+
+  // Delete vertex buffers
+#if _USE_BUFFERS
+#if _INTERLEAVED_BUFFER
+  glDeleteBuffers(1, &vertexBuffer);
+#else
+  glDeleteBuffers(1, &positionBuffer);
+  glDeleteBuffers(1, &colorBuffer);
+#endif // _INTERLEAVED_BUFFER
+#endif // _USE_BUFFERS
 
   // Release the shader program
   glDeleteProgram(shaderProgram);

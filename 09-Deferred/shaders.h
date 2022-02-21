@@ -202,11 +202,15 @@ layout (std140) uniform InstanceBuffer
 
 // Camera position in world space coordinates
 uniform vec4 cameraPosWS;
+// Near/far clip planes for depth reconstruction
+uniform vec2 NEAR_FAR;
 
 // Vertex output
 out VertexData
 {
-  vec3 viewRayWS;
+  // Represents a point in the far plane, hence no perspective division
+  noperspective vec3 viewRayWS;
+  // This is a light index and interpolation makes no sense
   flat int lightID;
 } vOut;
 
@@ -222,8 +226,16 @@ void main()
   vec4 worldPos = vec4(vec4(position.xyz, 1.0f) * modelToWorld, 1.0f);
   vec4 viewPos = vec4(worldPos * worldToView, 1.0f);
 
-  // Output the WS view ray towards the far plane
-  vOut.viewRayWS = (worldPos - cameraPosWS).xyz;
+  // Output the WS view ray towards the far plane:
+  // Take view direction from the worldToView inverse matrix (using transpose)
+  vec3 viewDirWS = vec3(worldToView[2][0], worldToView[2][1], worldToView[2][2]);
+  // Point along the viewDirWS in the far plane
+  vec3 p = viewDirWS * NEAR_FAR.y;
+  // Intersect ray from camera towards the WS vertex position with the far plane
+  vec3 viewRayWS = worldPos.xyz - cameraPosWS.xyz;
+  float t = dot(p, viewDirWS) / dot(viewRayWS, viewDirWS);
+  // Pass the intersection to the fragment shader
+  vOut.viewRayWS = viewRayWS * t;
 
   gl_Position = projection * viewPos;
 }
@@ -290,7 +302,7 @@ in VertexData
 // Fragment shader outputs
 layout (location = 0) out vec3 oColor;
 layout (location = 1) out vec2 oNormal;
-layout (location = 2) out vec2 oMaterial;
+layout (location = 2) out uvec3 oMaterial;
 
 void main()
 {
@@ -307,8 +319,11 @@ void main()
   // Just output the material properties into the GBuffer:
   // everything that we'll need to calculate lighting later on
   oColor = albedo;
-  oNormal = normal.xy;
-  oMaterial = vec2(specSample, occlusion);
+  oNormal = normal.xz;
+
+  // Pass information about normal orientation, just a single bit, 7 others free to use
+  uint bitFlags = normal.y < 0.0f ? 1u : 0u;
+  oMaterial = uvec3(specSample * 255.0f, occlusion * 255.0f, bitFlags);
 }
 )",
 // ----------------------------------------------------------------------------
@@ -327,12 +342,12 @@ R"(
 layout (binding = 0) uniform sampler2D Depth;
 layout (binding = 1) uniform sampler2D Color;
 layout (binding = 2) uniform sampler2D Normals;
-layout (binding = 3) uniform sampler2D Material;
+layout (binding = 3) uniform usampler2D Material;
 
 // Output color
 out vec4 oColor;
 
-// Global ambiet light intensity
+// Global ambient light intensity and color
 layout (location = 0) uniform vec3 ambientLight;
 
 void main()
@@ -342,7 +357,7 @@ void main()
 
   // Fetch the required GBuffer data
   vec3 albedo = texelFetch(Color, texel, 0).rgb;
-  float occlusion = texelFetch(Material, texel, 0).g;
+  float occlusion = texelFetch(Material, texel, 0).g / 255.0f;
 
   // We're calculating here just the ambient light contribution to the scene,
   // but we could calculate directional light here as well
@@ -363,7 +378,7 @@ R"(
 layout (binding = 0) uniform sampler2D Depth;
 layout (binding = 1) uniform sampler2D Color;
 layout (binding = 2) uniform sampler2D Normals;
-layout (binding = 3) uniform sampler2D Material;
+layout (binding = 3) uniform usampler2D Material;
 
 // Must match the structure on the CPU side
 struct LightData
@@ -384,7 +399,7 @@ layout (std140) uniform LightBuffer
 // Vertex inputs
 in VertexData
 {
-  vec3 viewRayWS;
+  noperspective vec3 viewRayWS;
   flat int lightID;
 } vIn;
 
@@ -400,29 +415,36 @@ void main()
 {
   ivec2 texel = ivec2(gl_FragCoord.xy);
 
-  // Reconstruct the world space position using the sampled depth value
+  // Reconstruct the world space position using linearized sampled depth value
   const float near = NEAR_FAR.x;
   const float far = NEAR_FAR.y;
   float d = texelFetch(Depth, texel, 0).r;
-  float z = 2.0f * (near * far) / (near + far - d * (far + near));
+  float z = (near * far) / (far + d * (near - far));
+  // vIn.viewRayWS is at far plane, so just scale it down to the Z value
+  vec3 posWS = cameraPosWS.xyz + vIn.viewRayWS * (z / far);
 
-  vec3 viewDirWS = normalize(vIn.viewRayWS);
-  vec3 posWS = cameraPosWS.xyz + viewDirWS * z;
+  // World space viewing direction
+  vec3 viewDirWS = -normalize(vIn.viewRayWS);
 
   // Reconstruct the world space normal
   vec2 n = texelFetch(Normals, texel, 0).rg;
-  float nz = sqrt(max(1e-5, 1.0f - dot(n, n)));
-  vec3 normalWS = vec3(n.x, n.y, nz);
+  uint bitFlags = texelFetch(Material, texel, 0).b;
+  float y = (bitFlags == 1u ? -1.0f : 1.0f) * sqrt(max(1e-5, 1.0f - dot(n, n)));
+  vec3 normalWS = vec3(n.r, y, n.g);
 
   // Fetch albedo and specularity
   vec3 albedo = texelFetch(Color, texel, 0).rgb;
-  float specularity = texelFetch(Material, texel, 0).r;
+  float specularity = texelFetch(Material, texel, 0).r / 255.0f;
 
   // Calculate the lighting direction and distance
   vec3 lightDirWS = lightBuffer[vIn.lightID].positionWS.xyz - posWS;
   float distSq = dot(lightDirWS, lightDirWS);
   float dist = sqrt(distSq);
   lightDirWS /= dist;
+
+  // Need to make sure that distance function gets to 0 before leaving light volume
+  float radius = lightBuffer[vIn.lightID].positionWS.w;
+  float attenuation = 1.0f - smoothstep(0.66f * radius, 0.9f * radius, dist);
 
   // Calculate the halfway direction vector (cheaper approximation of
   // the reflected direction = reflect(-lightDirWS, normal)
@@ -434,8 +456,8 @@ void main()
 
   // Calculate the Blinn-Phong model diffuse and specular terms
   vec3 lightColor = lightBuffer[vIn.lightID].color.rgb;
-  vec3 diffuse = NdotL * lightColor / distSq;
-  vec3 specular = specularity * lightColor * pow(NdotH, 64.0f) / distSq;
+  vec3 diffuse = attenuation * NdotL * lightColor / distSq;
+  vec3 specular = attenuation * specularity * lightColor * pow(NdotH, 64.0f) / distSq;
 
   // Calculate the final color
   vec3 finalColor = albedo * diffuse + specular;
@@ -467,7 +489,7 @@ layout (std140) uniform LightBuffer
 // Vertex inputs
 in VertexData
 {
-  vec3 viewRayWS;
+  noperspective vec3 viewRayWS;
   flat int lightID;
 } vIn;
 
@@ -496,7 +518,7 @@ R"(
 layout (binding = 0) uniform sampler2D Depth;
 layout (binding = 1) uniform sampler2D Color;
 layout (binding = 2) uniform sampler2D Normals;
-layout (binding = 3) uniform sampler2D Material;
+layout (binding = 3) uniform usampler2D Material;
 layout (binding = 4) uniform sampler2D HDR;
 
 // Number of used MSAA samples
@@ -538,9 +560,7 @@ void main()
 
     // Fetch depth and linearize it by reverting the projection matrix transformation
     float d = texelFetch(Depth, texel, 0).r;
-
-    // For [-1, 1] depth range, omitting 2* term to forgo division by 2 further
-    float z = (near * far) / (near + far - d * (far + near));
+    float z = (near * far) / (far + d * (near - far));
 
     // Remap it to [0, 1] range for display
     z = z / (far - near);
@@ -551,19 +571,20 @@ void main()
   {
     // Reconstruct world space normal and display it
     vec2 n = texelFetch(Normals, texel, 0).rg;
-    float z = sqrt(max(1e-5, 1.0f - dot(n, n)));
-    vec3 normal = vec3(n.x, n.y, z);
+    uint bitFlags = texelFetch(Material, texel, 0).b;
+    float y = (bitFlags == 1u ? -1.0f : 1.0f) * sqrt(max(1e-5, 1.0f - dot(n, n)));
+    vec3 normal = vec3(n.r, y, n.g);
     finalColor = normal * 0.5f + 0.5f;
   }
   else if (MODE == 4)
   {
     // Fetch the material specularity value and display it
-    finalColor = texelFetch(Material, texel, 0).rrr;
+    finalColor = texelFetch(Material, texel, 0).rrr / 255.0f;
   }
   else if (MODE == 5)
   {
     // Fetch the material occlusion value and display it
-    finalColor = texelFetch(Material, texel, 0).ggg;
+    finalColor = texelFetch(Material, texel, 0).ggg / 255.0f;
   }
   else
   {
